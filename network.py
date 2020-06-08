@@ -6,7 +6,6 @@ import numpy as np
 import csv
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from torch.optim.lr_scheduler import StepLR
 
 # DEVICE CONFIGURATION
 
@@ -28,7 +27,6 @@ for i in csv:
     # Append identifier list for missing data
 
     conv1 = lambda i: i != "" or False
-
     identifier = ([conv1(j) for j in i])
 
     # Convert list to list of integers
@@ -54,7 +52,7 @@ for i in csv:
     # This occurs when the sequence of one feature is always 0.
     dataset[np.isnan(dataset)] = 0.0
 
-    dataset = np.concatenate((dataset, np.asarray(identifier)), axis=1)
+    # dataset = np.concatenate((dataset, np.asarray(identifier)), axis=1)
 
     data.append(dataset)
 
@@ -68,29 +66,25 @@ print(len(testing))
 
 # NEURAL NETWORK
 
-in_features = features*2
+in_features = features
 hidden_dim = 50
-out_features = features*2
+out_features = features
 n_layers = 2
 
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.h0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
-        self.h0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
-
-        self.lstm = nn.LSTM(in_features, hidden_dim, num_layers = n_layers, batch_first = True, dropout=0.5)
-        # self.gru = nn.GRU(in_features, hidden_dim, num_layers = n_layers, batch_first = True, dropout=0.5)
+        
+        self.lstm = nn.LSTM(in_features, hidden_dim, num_layers = n_layers, batch_first = True)
+        # self.gru = nn.GRU(in_features, hidden_dim, num_layers = n_layers, batch_first = True)
         self.l_out = nn.Linear(in_features = hidden_dim, out_features = out_features, bias = False)
-
-    def reset_hidden_state(self):
-        self.h0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
-        self.h0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
-
+ 
     def forward(self, x):
-        self.reset_hidden_state()
-        x, _ = self.lstm(x, (self.h0, self.c0))
-        x = x.view(self.lstm.hidden_size)
+        h0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
+        c0 = torch.zeros(n_layers, 1, hidden_dim).to(device)
+        x, _ = self.lstm(x, (h0,c0))
+        # x, _ = self.gru(x, h0)
+        x = x.view(-1, hidden_dim)
         x = self.l_out(x)
         return x[-1]
 
@@ -99,10 +93,10 @@ print(net)
 
 # TRAINING AND VALIDATION
 
-num_epochs = 20
+num_epochs = 100
 criterion = nn.MSELoss()
-optimizer = optim.SGD(net.parameters(), lr = 0.05, momentum = 0.8, weight_decay = 1e-5)
-scheduler = StepLR(optimizer, step_size=2, gamma=0.96)
+optimizer = optim.SGD(net.parameters(), lr = 0.3, momentum=0.8, weight_decay=1e-07)
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.93)
 
 training_loss, validation_loss, accuracy1, accuracy2 = [], [], [], []
 # Theshold for accuracy at around the market rate
@@ -125,19 +119,20 @@ for i in range(num_epochs):
         inputs = batch[:-1,:]
 
         inputs = torch.Tensor(inputs).to(device)
-        inputs = inputs.reshape(inputs.size(0), 1, in_features)
+        inputs = inputs.reshape(1, inputs.size(0), in_features)
         target = torch.Tensor(target).to(device)
 
         outputs = net(inputs)
+
         loss = criterion(outputs, target)
         
         epoch_validation_loss += loss.detach().cpu().numpy()
 
         pred = (((outputs - target) >= -threshold1) & ((outputs - target) <= threshold1)).view_as(target)  # to make pred have same shape as target
-        num_correct = torch.sum(pred).item()
+        num_correct = torch.sum(pred).item()/features
         total_num_corrects1 += num_correct
         pred = (((outputs - target) >= -threshold2) & ((outputs - target) <= threshold2)).view_as(target)  # to make pred have same shape as target
-        num_correct = torch.sum(pred).item()
+        num_correct = torch.sum(pred).item()/features
         total_num_corrects2 += num_correct
     
     net.train()
@@ -147,7 +142,7 @@ for i in range(num_epochs):
         inputs = batch[:-1,:]
 
         inputs = torch.Tensor(inputs).to(device)
-        inputs = inputs.reshape(inputs.size(0), 1, in_features)
+        inputs = inputs.reshape(1, inputs.size(0), in_features)
         target = torch.Tensor(target).to(device)
         
         outputs = net(inputs)
@@ -159,8 +154,7 @@ for i in range(num_epochs):
         
         epoch_training_loss += loss.detach().cpu().numpy()
 
-    scheduler.step()
-
+        
     # Save loss for plot
     training_loss.append(epoch_training_loss/len(training))
     validation_loss.append(epoch_validation_loss/len(validation))
@@ -169,11 +163,12 @@ for i in range(num_epochs):
     accuracy1.append(total_num_corrects1/len(testing))
     accuracy2.append(total_num_corrects2/len(testing))
 
-    # Print loss every 5 epochs
-    if i % 1 == 0:
-        print('Epoch '+str(i)+', learning rate: '+str(scheduler.get_lr())+' training loss: '+str(training_loss[-1])+', validation loss: '+str(validation_loss[-1])+', 0.05 accuracy: '+str(accuracy1[-1])+', 0.10 accuracy: '+str(accuracy2[-1]))
+    scheduler.step()
 
-torch.save(net.state_dict(), 'test.pt')
+    # Print loss every epoch
+    print('Epoch ' + str(i) + ', learning rate: ' + str(scheduler.get_last_lr()) + ', training loss: '+ str(training_loss[-1]) + ', validation loss: '+str(validation_loss[-1])+', 0.05 accuracy: '+str(accuracy1[-1])+', 0.10 accuracy: '+str(accuracy2[-1]))
+
+torch.save(net.state_dict(), 'model.pt')
 
 net.eval()
 
@@ -182,12 +177,12 @@ total_num_corrects2 = 0
 correct1, correct2 = [], []
 
 for batch in testing:
-    target = batch[-1, :]
-    inputs = batch[:-1, :]
+    target = batch[-1, 0:16]
+    inputs = batch[:-1, 0:16]
 
     # Convert inputs to tensor
     inputs = torch.Tensor(inputs).to(device)
-    inputs = inputs.reshape(inputs.size(0), 1, in_features)
+    inputs = inputs.reshape(1, inputs.size(0), in_features)
 
     # Convert target to tensor
     target = torch.Tensor(target).to(device)
@@ -198,19 +193,19 @@ for batch in testing:
     # Prediction is compared to a threshold as 100 % accuracy is not needed
     pred = (((outputs - target) >= -threshold1) & ((outputs - target) <= threshold1)).view_as(target)  # to make pred have same shape as target
     num_correct = torch.sum(pred).item()
-    total_num_corrects1 += num_correct
+    total_num_corrects1 += num_correct/in_features
     correct1.append(num_correct)
     pred = (((outputs - target) >= -threshold2) & ((outputs - target) <= threshold2)).view_as(target)  # to make pred have same shape as target
     num_correct = torch.sum(pred).item()
-    total_num_corrects2 += num_correct
+    total_num_corrects2 += num_correct/in_features
     correct2.append(num_correct)
 
-print('Test 0.05 accuracy is '+str(total_num_corrects1/len(testing)))
-print('Test 0.10 accuracy is '+str(total_num_corrects2/len(testing)))
+print(f'Test 0.05 accuracy is {total_num_corrects1/len(testing):.4f}')
+print(f'Test 0.10 accuracy is {total_num_corrects2/len(testing):.4f}')
 
 test = testing[0]
 
-target = batch[1:, :]
+target = batch[-1, :]
 inputs = batch[:-1, :]
 
 inputs = torch.Tensor(inputs)
